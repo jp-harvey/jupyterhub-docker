@@ -1,67 +1,76 @@
-FROM jupyter/scipy-notebook:137a295ff71b
+ARG DOCKER_NOTEBOOK_BASE=jupyter/scipy-notebook:latest
 
-LABEL maintainer="Luca De Feo <https://defeo.lu/>"
+# Reference OmniSci to grab the client tools
+# https://hub.docker.com/r/omnisci/core-os-cpu
+# https://hub.docker.com/r/omnisci/core-clients-base
+FROM omnisci/core-os-cpu AS core
+
+######################################
+
+FROM $DOCKER_NOTEBOOK_BASE
+
+LABEL maintainer="OmniSci <info@omnisci.com>"
 
 USER root
 
-# APT packages
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    fonts-dejavu \
-    tzdata \
-    gfortran \
-    gcc \
-    scilab \
-    pari-gp \
-    libpari-dev \
-    sagemath \
-    sagemath-jupyter \
-    libgmp-dev \
-    && apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt update && \
+    apt-get install -y vim pigz less awscli
 
-USER $NB_UID
+RUN mkdir -p /omnisci/bin
+RUN mkdir -p /tmp/src && chown 1000:1000 /tmp/src
+# TODO add other cli tools
+COPY --from=core /omnisci/bin/omnisql /omnisci/bin/*Importer /omnisci/bin/omnisci-jdbc-*.jar /omnisci/bin/
+ENV PATH="${PATH}:/omnisci/bin"
 
-# Conda packages
-# Sage conflicts with the latest jupyterhub, thus we must relax the pinning
-RUN conda install --quiet --yes \
-    'r-base=3.4.1' \
-    'r-irkernel=0.8*' \
-    'r-plyr=1.8*' \
-    'r-devtools=1.13*' \
-    'r-tidyverse=1.1*' \
-    'r-shiny=1.0*' \
-    'r-rmarkdown=1.8*' \
-    'r-forecast=8.2*' \
-    'r-rsqlite=2.0*' \
-    'r-reshape2=1.4*' \
-    'r-nycflights13=0.2*' \
-    'r-caret=6.0*' \
-    'r-rcurl=1.95*' \
-    'r-crayon=1.3*' \
-    'r-randomforest=4.6*' \
-    'r-htmltools=0.3*' \
-    'r-sparklyr=0.7*' \
-    'r-htmlwidgets=1.0*' \
-    'r-hexbin=1.27*' \
-    'jupyterhub' \
-#    'sage=8.*' \
-    'julia=1.0*' && \
-    conda clean -tipsy && \
-    fix-permissions $CONDA_DIR
+USER $NB_USER
 
-ENV CPATH=$CONDA_DIR/include
+ENV PATH="${PATH}:/omnisci/bin"
 
-RUN pip install \
-    pari_jupyter \
-#    PySingular jupyter_kernel_singular \
-    scilab-kernel && \
-    fix-permissions $CONDA_DIR
+# ARG JUPYTERHUB_VERSION
+# RUN python3 -m pip install --no-cache jupyterhub==$JUPYTERHUB_VERSION
 
-# Fix SageMath kernel
-USER root
-RUN sed -i 's/"\/usr\/bin\/sage"/"env", "PATH=\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin", "\/usr\/bin\/sage"/' /usr/share/jupyter/kernels/sagemath/kernel.json
-USER $NB_UID
+# update conda and pip
+# install gcc because ibis requires regex which will fail to build without it
+ARG JUPYTERHUB_VERSION
+RUN conda update -y -n base conda pip && \
+    conda install -y -n base gcc_linux-64 vega nodejs jupyterhub=$JUPYTERHUB_VERSION boto3
 
-# Add conda env hook
-COPY ./conda-activate.sh /usr/local/bin/before-notebook.d/
+# Build
+# TODO move to a build-stage FROM
+
+WORKDIR /tmp/src
+RUN git clone --single-branch --branch mikehinchey/docker https://github.com/mikehinchey/jupyterlab-omnisci && \
+        cd jupyterlab-omnisci && \
+        conda env update -n base -f binder/environment.yml
+WORKDIR /tmp/src/jupyterlab-omnisci
+RUN conda init bash
+RUN jlpm install
+RUN jlpm run build
+RUN jupyter labextension install .
+RUN pip install . && \
+        mkdir -p ~/omnisci_examples && \
+        cp notebooks/*.ipynb ~/omnisci_examples && \
+        chmod -R ugo-w ~/omnisci_examples && \
+        rm -Rf /tmp/src 
+
+# See README.md:
+# RUN pip install git+https://github.com/jakevdp/altair.git@vl3-rc8
+
+# Include example notebooks in the image
+WORKDIR $HOME
+# RUN mkdir omnisci_examples
+# COPY --chown=1000 notebooks/*.ipynb omnisci_examples/
+# # make them read-only so it's not mistaken changes are persistent
+# RUN chmod -R ugo-w omnisci_examples
+
+# https://rapids.ai/start.html
+# https://anaconda.org/rapidsai/repo
+ARG RAPIDS_VERSION
+RUN conda install -y -n base \
+    -c nvidia -c rapidsai -c pytorch -c numba -c conda-forge -c defaults \
+    cudf=$RAPIDS_VERSION cuml=$RAPIDS_VERSION dask-cuda=$RAPIDS_VERSION dask-cudf=$RAPIDS_VERSION nvstrings=0.3
+
+# ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64/:/opt/conda/lib
+
+ENV JUPYTER_ENABLE_LAB=yes

@@ -6,4 +6,6 @@ RUN wget https://raw.githubusercontent.com/jupyterhub/jupyterhub/0.9.3/examples/
 
 RUN pip install \
     dockerspawner==0.10.0 \
-    oauthenticator==0.8.0
+    oauthenticator==0.8.0 \
+    jupyterhub-dummyauthenticator \
+    jhub_remote_user_authenticator
